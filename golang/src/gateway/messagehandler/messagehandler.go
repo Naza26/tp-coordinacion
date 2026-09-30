@@ -21,7 +21,7 @@ func (counter *SafeClientIdGenerator) GenerateId() int {
 	return clientId
 }
 
-var clientIdCounter = SafeClientIdGenerator{value: 0}
+var clientIdCounter = SafeClientIdGenerator{value: 1}
 
 type MessageHandler struct {
 	clientId int
@@ -34,19 +34,27 @@ func NewMessageHandler() MessageHandler {
 }
 
 func (messageHandler *MessageHandler) SerializeDataMessage(fruitRecord fruititem.FruitItem) (*middleware.Message, error) {
-	data := []fruititem.FruitItem{fruitRecord}
-	return inner.SerializeMessage(data)
+	fruitData := []fruititem.FruitItem{fruitRecord}
+	clientId := messageHandler.clientId
+	return inner.SerializeMessage(clientId, fruitData)
 }
 
 func (messageHandler *MessageHandler) SerializeEOFMessage() (*middleware.Message, error) {
 	data := []fruititem.FruitItem{}
-	return inner.SerializeMessage(data)
+	clientId := messageHandler.clientId
+	return inner.SerializeMessage(clientId, data)
 }
 
 func (messageHandler *MessageHandler) DeserializeResultMessage(message *middleware.Message) ([]fruititem.FruitItem, error) {
-	fruitRecords, _, err := inner.DeserializeMessage(message)
+	clientId, fruitRecords, isEof, err := inner.DeserializeMessage(message)
 	if err != nil {
 		return nil, err
+	}
+	if clientId != messageHandler.clientId {
+		return nil, nil
+	}
+	if isEof { // TODO: Think how to handle [id, []] (empty top?)
+		return nil, nil
 	}
 	return fruitRecords, nil
 }
