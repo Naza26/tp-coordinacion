@@ -1,16 +1,36 @@
 package messagehandler
 
 import (
+	"sync"
+
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/middleware"
 )
 
+type SafeClientIdGenerator struct {
+	mutex sync.Mutex
+	value int
+}
+
+func (counter *SafeClientIdGenerator) GenerateId() int {
+	counter.mutex.Lock()
+	defer counter.mutex.Unlock()
+	clientId := counter.value
+	counter.value++
+	return clientId
+}
+
+var clientIdCounter = SafeClientIdGenerator{value: 0}
+
 type MessageHandler struct {
+	clientId int
 }
 
 func NewMessageHandler() MessageHandler {
-	return MessageHandler{}
+	clientId := clientIdCounter.GenerateId()
+	messageHandler := MessageHandler{clientId}
+	return messageHandler
 }
 
 func (messageHandler *MessageHandler) SerializeDataMessage(fruitRecord fruititem.FruitItem) (*middleware.Message, error) {
