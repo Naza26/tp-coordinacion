@@ -3,6 +3,7 @@ package sum
 import (
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/fruititem"
 	"github.com/7574-sistemas-distribuidos/tp-coordinacion/common/messageprotocol/inner"
@@ -21,9 +22,12 @@ type SumConfig struct {
 }
 
 type Sum struct {
-	inputQueue     middleware.Middleware
-	outputExchange middleware.Middleware
-	fruitItemMap   map[int]map[string]fruititem.FruitItem
+	inputQueue          middleware.Middleware
+	outputExchange      middleware.Middleware
+	flushInputExchange  middleware.Middleware
+	flushOutputExchange middleware.Middleware
+	mutex               sync.Mutex
+	fruitItemMap        map[int]map[string]fruititem.FruitItem
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
@@ -35,8 +39,8 @@ func NewSum(config SumConfig) (*Sum, error) {
 	}
 
 	outputExchangeRouteKeys := make([]string, config.AggregationAmount)
-	for i := range config.AggregationAmount {
-		outputExchangeRouteKeys[i] = fmt.Sprintf("%s_%d", config.AggregationPrefix, i)
+	for nodeId := range config.AggregationAmount {
+		outputExchangeRouteKeys[nodeId] = fmt.Sprintf("%s_%d", config.AggregationPrefix, nodeId)
 	}
 
 	outputExchange, err := middleware.CreateExchangeMiddleware(config.AggregationPrefix, outputExchangeRouteKeys, connSettings)
@@ -45,14 +49,40 @@ func NewSum(config SumConfig) (*Sum, error) {
 		return nil, err
 	}
 
+	flushInputExchangeRouteKey := []string{fmt.Sprintf("%s_%d", config.SumPrefix, config.Id)}
+	flushInputExchange, err := middleware.CreateExchangeMiddleware(config.SumPrefix, flushInputExchangeRouteKey, connSettings)
+	if err != nil {
+		inputQueue.Close()
+		outputExchange.Close()
+		return nil, err
+	}
+
+	flushOutputExchangeRouteKeys := make([]string, config.SumAmount)
+	for nodeId := range config.SumAmount {
+		flushOutputExchangeRouteKeys[nodeId] = fmt.Sprintf("%s_%d", config.SumPrefix, nodeId)
+	}
+
+	flushOutputExchange, err := middleware.CreateExchangeMiddleware(config.SumPrefix, flushOutputExchangeRouteKeys, connSettings)
+	if err != nil {
+		inputQueue.Close()
+		outputExchange.Close()
+		flushInputExchange.Close()
+		return nil, err
+	}
+
 	return &Sum{
-		inputQueue:     inputQueue,
-		outputExchange: outputExchange,
-		fruitItemMap:   map[int]map[string]fruititem.FruitItem{},
+		inputQueue:          inputQueue,
+		outputExchange:      outputExchange,
+		flushInputExchange:  flushInputExchange,
+		flushOutputExchange: flushOutputExchange,
+		fruitItemMap:        map[int]map[string]fruititem.FruitItem{},
 	}, nil
 }
 
 func (sum *Sum) Run() {
+	go sum.flushInputExchange.StartConsuming(func(msg middleware.Message, ack, nack func()) {
+		sum.handleFlushMessage(msg, ack, nack)
+	})
 	sum.inputQueue.StartConsuming(func(msg middleware.Message, ack, nack func()) {
 		sum.handleMessage(msg, ack, nack)
 	})
@@ -80,7 +110,59 @@ func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 }
 
 func (sum *Sum) handleEndOfRecordMessage(clientId int) error {
-	slog.Info("Received End Of Records message", "clientId", clientId)
+	slog.Info("Received End Of Records message, broadcasting flush", "clientId", clientId)
+	flushMessage := []fruititem.FruitItem{}
+	message, err := inner.SerializeMessage(clientId, flushMessage)
+	if err != nil {
+		slog.Debug("While serializing flush message", "err", err)
+		return err
+	}
+	if err := sum.flushOutputExchange.Send(*message); err != nil {
+		slog.Debug("While sending flush message", "err", err)
+		return err
+	}
+	return nil
+}
+
+func (sum *Sum) handleDataMessage(clientId int, fruitRecords []fruititem.FruitItem) error {
+	sum.mutex.Lock()
+	defer sum.mutex.Unlock()
+
+	clientFruitItemMap, ok := sum.fruitItemMap[clientId]
+	if !ok {
+		clientFruitItemMap = map[string]fruititem.FruitItem{}
+		sum.fruitItemMap[clientId] = clientFruitItemMap
+	}
+	for _, fruitRecord := range fruitRecords {
+		_, ok := clientFruitItemMap[fruitRecord.Fruit]
+		if ok {
+			clientFruitItemMap[fruitRecord.Fruit] = clientFruitItemMap[fruitRecord.Fruit].Sum(fruitRecord)
+		} else {
+			clientFruitItemMap[fruitRecord.Fruit] = fruitRecord
+		}
+	}
+	return nil
+}
+
+func (sum *Sum) handleFlushMessage(msg middleware.Message, ack func(), nack func()) {
+	defer ack()
+
+	clientId, _, _, err := inner.DeserializeMessage(&msg)
+	if err != nil {
+		slog.Error("While deserializing flush message", "err", err)
+		return
+	}
+
+	if err := sum.flushClient(clientId); err != nil {
+		slog.Error("While flushing client", "err", err)
+	}
+}
+
+func (sum *Sum) flushClient(clientId int) error {
+	sum.mutex.Lock()
+	defer sum.mutex.Unlock()
+
+	slog.Info("Flushing client", "clientId", clientId)
 	clientFruitItemMap := sum.fruitItemMap[clientId]
 	for key := range clientFruitItemMap {
 		fruitRecord := []fruititem.FruitItem{clientFruitItemMap[key]}
@@ -106,22 +188,5 @@ func (sum *Sum) handleEndOfRecordMessage(clientId int) error {
 		return err
 	}
 	delete(sum.fruitItemMap, clientId)
-	return nil
-}
-
-func (sum *Sum) handleDataMessage(clientId int, fruitRecords []fruititem.FruitItem) error {
-	clientFruitItemMap, ok := sum.fruitItemMap[clientId]
-	if !ok {
-		clientFruitItemMap = map[string]fruititem.FruitItem{}
-		sum.fruitItemMap[clientId] = clientFruitItemMap
-	}
-	for _, fruitRecord := range fruitRecords {
-		_, ok := clientFruitItemMap[fruitRecord.Fruit]
-		if ok {
-			clientFruitItemMap[fruitRecord.Fruit] = clientFruitItemMap[fruitRecord.Fruit].Sum(fruitRecord)
-		} else {
-			clientFruitItemMap[fruitRecord.Fruit] = fruitRecord
-		}
-	}
 	return nil
 }
