@@ -24,22 +24,29 @@ func (counter *SafeClientIdGenerator) GenerateId() int {
 var clientIdCounter = SafeClientIdGenerator{value: 1}
 
 type MessageHandler struct {
-	clientId int
+	clientId     int
+	sentMessages int
 }
 
 func NewMessageHandler() MessageHandler {
 	clientId := clientIdCounter.GenerateId()
-	messageHandler := MessageHandler{clientId}
+	sentMessages := 0
+	messageHandler := MessageHandler{clientId, sentMessages}
 	return messageHandler
 }
 
 func (messageHandler *MessageHandler) SerializeDataMessage(fruitRecord fruititem.FruitItem) (*middleware.Message, error) {
 	dataMessage := inner.DataMessage{ClientId: messageHandler.clientId, FruitRecords: []fruititem.FruitItem{fruitRecord}}
-	return inner.SerializeDataMessage(dataMessage)
+	message, err := inner.SerializeDataMessage(dataMessage)
+	if err != nil {
+		return nil, err
+	}
+	messageHandler.sentMessages++
+	return message, nil
 }
 
 func (messageHandler *MessageHandler) SerializeEOFMessage() (*middleware.Message, error) {
-	eofMessage := inner.EofMessage{ClientId: messageHandler.clientId}
+	eofMessage := inner.EofMessage{ClientId: messageHandler.clientId, Total: messageHandler.sentMessages}
 	return inner.SerializeEofMessage(eofMessage)
 }
 

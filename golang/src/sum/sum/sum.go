@@ -22,12 +22,13 @@ type SumConfig struct {
 }
 
 type Sum struct {
-	inputQueue          middleware.Middleware
-	outputExchange      middleware.Middleware
-	flushInputExchange  middleware.Middleware
-	flushOutputExchange middleware.Middleware
-	mutex               sync.Mutex
-	fruitItemMap        map[int]map[string]fruititem.FruitItem
+	inputQueue              middleware.Middleware
+	outputExchange          middleware.Middleware
+	flushInputExchange      middleware.Middleware
+	flushOutputExchange     middleware.Middleware
+	mutex                   sync.Mutex
+	fruitItemMap            map[int]map[string]fruititem.FruitItem
+	processedClientMessages map[int]int
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
@@ -71,11 +72,12 @@ func NewSum(config SumConfig) (*Sum, error) {
 	}
 
 	return &Sum{
-		inputQueue:          inputQueue,
-		outputExchange:      outputExchange,
-		flushInputExchange:  flushInputExchange,
-		flushOutputExchange: flushOutputExchange,
-		fruitItemMap:        map[int]map[string]fruititem.FruitItem{},
+		inputQueue:              inputQueue,
+		outputExchange:          outputExchange,
+		flushInputExchange:      flushInputExchange,
+		flushOutputExchange:     flushOutputExchange,
+		fruitItemMap:            map[int]map[string]fruititem.FruitItem{},
+		processedClientMessages: map[int]int{},
 	}, nil
 }
 
@@ -143,6 +145,7 @@ func (sum *Sum) handleDataMessage(clientId int, fruitRecords []fruititem.FruitIt
 			clientFruitItemMap[fruitRecord.Fruit] = fruitRecord
 		}
 	}
+	sum.processedClientMessages[clientId] += 1
 	return nil
 }
 
@@ -161,15 +164,19 @@ func (sum *Sum) handleFlushMessage(msg middleware.Message, ack func(), nack func
 		return
 	}
 
-	if err := sum.flushClient(flushMessage.ClientId, flushMessage.Total); err != nil {
-		slog.Error("While flushing client", "err", err)
-	}
-}
-
-func (sum *Sum) flushClient(clientId int, total int) error {
 	sum.mutex.Lock()
 	defer sum.mutex.Unlock()
 
+	if err := sum.flushClient(flushMessage.ClientId); err != nil {
+		slog.Error("While flushing client", "err", err)
+	}
+
+	if err := sum.notifySumFinalization(flushMessage.ClientId, flushMessage.Total); err != nil {
+		slog.Error("While notifying sum finalization", "err", err)
+	}
+}
+
+func (sum *Sum) flushClient(clientId int) error {
 	slog.Info("Flushing client", "clientId", clientId)
 	clientFruitItemMap := sum.fruitItemMap[clientId]
 	for key := range clientFruitItemMap {
@@ -185,7 +192,14 @@ func (sum *Sum) flushClient(clientId int, total int) error {
 		}
 	}
 
-	finMessage := inner.FinMessage{ClientId: clientId, Total: total}
+	delete(sum.fruitItemMap, clientId)
+	return nil
+}
+
+func (sum *Sum) notifySumFinalization(clientId int, totalExpectedMessages int) error {
+	processedMessageCount := sum.processedClientMessages[clientId]
+	slog.Info("Received FIN message", "clientId", clientId, "processed", processedMessageCount)
+	finMessage := inner.FinMessage{ClientId: clientId, Processed: processedMessageCount, Total: totalExpectedMessages}
 	message, err := inner.SerializeFinMessage(finMessage)
 	if err != nil {
 		slog.Debug("While serializing fin message", "err", err)
@@ -195,6 +209,5 @@ func (sum *Sum) flushClient(clientId int, total int) error {
 		slog.Debug("While sending fin message", "err", err)
 		return err
 	}
-	delete(sum.fruitItemMap, clientId)
 	return nil
 }

@@ -23,10 +23,12 @@ type AggregationConfig struct {
 }
 
 type Aggregation struct {
-	outputQueue   middleware.Middleware
-	inputExchange middleware.Middleware
-	fruitItemMap  map[int]map[string]fruititem.FruitItem
-	topSize       int
+	outputQueue           middleware.Middleware
+	inputExchange         middleware.Middleware
+	fruitItemMap          map[int]map[string]fruititem.FruitItem
+	topSize               int
+	processedClientSums   map[int]int
+	totalExpectedMessages map[int]int
 }
 
 func NewAggregation(config AggregationConfig) (*Aggregation, error) {
@@ -45,10 +47,12 @@ func NewAggregation(config AggregationConfig) (*Aggregation, error) {
 	}
 
 	return &Aggregation{
-		outputQueue:   outputQueue,
-		inputExchange: inputExchange,
-		fruitItemMap:  map[int]map[string]fruititem.FruitItem{},
-		topSize:       config.TopSize,
+		outputQueue:           outputQueue,
+		inputExchange:         inputExchange,
+		fruitItemMap:          map[int]map[string]fruititem.FruitItem{},
+		topSize:               config.TopSize,
+		processedClientSums:   map[int]int{},
+		totalExpectedMessages: map[int]int{},
 	}, nil
 }
 
@@ -71,30 +75,42 @@ func (aggregation *Aggregation) handleMessage(msg middleware.Message, ack func()
 	case inner.DataMessage:
 		aggregation.handleDataMessage(message.ClientId, message.FruitRecords)
 	case inner.FinMessage:
-		if err := aggregation.handleEndOfRecordsMessage(message.ClientId); err != nil {
-			slog.Error("While handling end of record message", "err", err)
+		if err := aggregation.handleSumFinalizationMessage(message.ClientId, message.Processed, message.Total); err != nil {
+			slog.Error("While handling sum finalization message", "err", err)
 		}
 	default:
 		slog.Error("Unexpected message type on aggregation input", "clientId", message.GetClientId())
 	}
 }
 
-func (aggregation *Aggregation) handleEndOfRecordsMessage(clientId int) error {
-	slog.Info("Received End Of Records message", "clientId", clientId)
+func (aggregation *Aggregation) handleSumFinalizationMessage(clientId int, processed int, total int) error {
+	slog.Info("Received sum finalization message", "clientId", clientId, "processed", processed, "total", total)
+	aggregation.processedClientSums[clientId] += processed
+	aggregation.totalExpectedMessages[clientId] = total
 	clientFruitItemMap := aggregation.fruitItemMap[clientId]
 	fruitTopRecords := aggregation.buildFruitTop(clientFruitItemMap)
 	topMessage := inner.TopMessage{ClientId: clientId, TopRecords: fruitTopRecords}
-	message, err := inner.SerializeTopMessage(topMessage)
-	if err != nil {
-		slog.Debug("While serializing top message", "err", err)
-		return err
-	}
-	if err := aggregation.outputQueue.Send(*message); err != nil {
-		slog.Debug("While sending top message", "err", err)
-		return err
+	processedCount := aggregation.processedClientSums[clientId]
+	totalCount := aggregation.totalExpectedMessages[clientId]
+	if processedCount == totalCount {
+		slog.Info("All sums processed for client", "clientId", clientId)
+		message, err := inner.SerializeTopMessage(topMessage)
+		if err != nil {
+			slog.Debug("While serializing top message", "err", err)
+			return err
+		}
+		if err := aggregation.outputQueue.Send(*message); err != nil {
+			slog.Debug("While sending top message", "err", err)
+			return err
+		}
+
+		delete(aggregation.fruitItemMap, clientId)
+		delete(aggregation.processedClientSums, clientId)
+		delete(aggregation.totalExpectedMessages, clientId)
+	} else {
+		slog.Info("Not all sums processed for client", "clientId", clientId, "processedCount", processedCount, "totalCount", totalCount)
 	}
 
-	delete(aggregation.fruitItemMap, clientId)
 	return nil
 }
 
