@@ -47,3 +47,6 @@ Entiendo que en la práctica esto no es relevante porque ni bien el gateway reci
 Debería definir un criterio de separación.
 Podría ser por dato o por cliente. En este momento no puedo hacer bien un tradeoff sobre las ventajas / desventajas de cada uno de los enfoques más que comentar que el particionamiento por dato a priori me parece más correcto pero a la vez más complejo, porque de nuevo, tengo ahora en este nodo un pedazo de los datos de cada cliente y tengo que pasarle la responsibilidad de joinear eso al otro nodo, al de join, porque siempre tiene que haber un funnel que agrupe la información que sigo particionando, sino nunca se encontraría para realizar el cáluclo final.
 
+# Escenario 5: Nombres al azar
+
+No tengo ningún valor harcodeado por lo que entiendo que no me encuentro con este problema directamente. De todos modos vale la pena aclarar que no tengo implementada la replicación de los nodos de agregación pero no vería el problema incluso con eso implementado de sufrir algún cambio en este escenario.
