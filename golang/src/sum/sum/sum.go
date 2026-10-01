@@ -91,28 +91,30 @@ func (sum *Sum) Run() {
 func (sum *Sum) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
 
-	clientId, fruitRecords, isEof, err := inner.DeserializeMessage(&msg)
+	protocolMessage, err := inner.DeserializeMessage(&msg)
 	if err != nil {
 		slog.Error("While deserializing message", "err", err)
 		return
 	}
 
-	if isEof {
-		if err := sum.handleEndOfRecordMessage(clientId); err != nil {
+	switch message := protocolMessage.(type) {
+	case inner.DataMessage:
+		if err := sum.handleDataMessage(message.ClientId, message.FruitRecords); err != nil {
+			slog.Error("While handling data message", "err", err)
+		}
+	case inner.EofMessage:
+		if err := sum.handleEndOfRecordMessage(message.ClientId, message.Total); err != nil {
 			slog.Error("While handling end of record message", "err", err)
 		}
-		return
-	}
-
-	if err := sum.handleDataMessage(clientId, fruitRecords); err != nil {
-		slog.Error("While handling data message", "err", err)
+	default:
+		slog.Error("Unexpected message type on input queue", "clientId", message.GetClientId())
 	}
 }
 
-func (sum *Sum) handleEndOfRecordMessage(clientId int) error {
+func (sum *Sum) handleEndOfRecordMessage(clientId int, total int) error {
 	slog.Info("Received End Of Records message, broadcasting flush", "clientId", clientId)
-	flushMessage := []fruititem.FruitItem{}
-	message, err := inner.SerializeMessage(clientId, flushMessage)
+	flushMessage := inner.FlushMessage{ClientId: clientId, Total: total}
+	message, err := inner.SerializeFlushMessage(flushMessage)
 	if err != nil {
 		slog.Debug("While serializing flush message", "err", err)
 		return err
@@ -147,26 +149,32 @@ func (sum *Sum) handleDataMessage(clientId int, fruitRecords []fruititem.FruitIt
 func (sum *Sum) handleFlushMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
 
-	clientId, _, _, err := inner.DeserializeMessage(&msg)
+	protocolMessage, err := inner.DeserializeMessage(&msg)
 	if err != nil {
 		slog.Error("While deserializing flush message", "err", err)
 		return
 	}
 
-	if err := sum.flushClient(clientId); err != nil {
+	flushMessage, ok := protocolMessage.(inner.FlushMessage)
+	if !ok {
+		slog.Error("Unexpected message type on flush queue", "clientId", protocolMessage.GetClientId())
+		return
+	}
+
+	if err := sum.flushClient(flushMessage.ClientId, flushMessage.Total); err != nil {
 		slog.Error("While flushing client", "err", err)
 	}
 }
 
-func (sum *Sum) flushClient(clientId int) error {
+func (sum *Sum) flushClient(clientId int, total int) error {
 	sum.mutex.Lock()
 	defer sum.mutex.Unlock()
 
 	slog.Info("Flushing client", "clientId", clientId)
 	clientFruitItemMap := sum.fruitItemMap[clientId]
 	for key := range clientFruitItemMap {
-		fruitRecord := []fruititem.FruitItem{clientFruitItemMap[key]}
-		message, err := inner.SerializeMessage(clientId, fruitRecord)
+		dataMessage := inner.DataMessage{ClientId: clientId, FruitRecords: []fruititem.FruitItem{clientFruitItemMap[key]}}
+		message, err := inner.SerializeDataMessage(dataMessage)
 		if err != nil {
 			slog.Debug("While serializing message", "err", err)
 			return err
@@ -177,14 +185,14 @@ func (sum *Sum) flushClient(clientId int) error {
 		}
 	}
 
-	eofMessage := []fruititem.FruitItem{}
-	message, err := inner.SerializeMessage(clientId, eofMessage)
+	finMessage := inner.FinMessage{ClientId: clientId, Total: total}
+	message, err := inner.SerializeFinMessage(finMessage)
 	if err != nil {
-		slog.Debug("While serializing EOF message", "err", err)
+		slog.Debug("While serializing fin message", "err", err)
 		return err
 	}
 	if err := sum.outputExchange.Send(*message); err != nil {
-		slog.Debug("While sending EOF message", "err", err)
+		slog.Debug("While sending fin message", "err", err)
 		return err
 	}
 	delete(sum.fruitItemMap, clientId)

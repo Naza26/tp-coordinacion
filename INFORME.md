@@ -14,3 +14,10 @@ El primer problema que tengo es que al tener más de un nodo de suma, solo una d
 Esto hace que solo uno de los nodos sepa que tiene que envíar información sobre ese client_id mientras que los demas nodos estarían teniendo en sus diccionarios información que nunca se envía al aggregator.
 Para resolver esto, crearía un nuevo mensaje, que le de aviso al resto de los nodos de suma que tienen que envíar los datos al aggregator y limpiar así sus diccionarios.
 Para que el mensaje le llegue a todas los nodos de suma, creo un exchange que le asocie una cola a cada nodo para que puedan recibir efectivamente esta señal.
+Para mantener consistencia entre los nodos de suma, el que recibe el EOF no envía la data directamente, también espera el mensaje de flush para seguir el mismo camino.
+Como ahora cada nodo de suma consume de dos colas en go rotuines, creo un mutex para proteger el diccionario (que tiene los datos), dado que uno puede estar leyendolo mientras otro puede estar borrando (flush).
+
+El segundo problema es que el aggregator recibe resultados parciales de un mismo cliente desde varios nodos suma, en cualquier orden, y no sabe cuándo ya tiene toda la información de ese cliente.
+Para saberlo, cuento mensajes. El gateway cuenta cuántos mensajes de datos envió cada cliente (total) y lo manda en el EOF, el flush lleva ese total a todos los nodos suma. Cada nodo suma cuenta cuántos mensajes de entrada procesó de ese cliente (processed) y lo envía al aggregator en su mensaje de fin, junto con total.
+El aggregator suma los processed que recibe de cada cliente. Cuando sum(processed) == total, recibió toda la información de ese cliente, ahí calcula el top N, lo envía al join y borra el estado de ese cliente.
+Esto no depende de cuántos nodos suma haya ni del orden en que lleguen los mensajes, y cubre el caso de un mensaje que todavía estaba en tránsito cuando llegó el flush (que podía darme resultados incompletos en el aggregator luego).

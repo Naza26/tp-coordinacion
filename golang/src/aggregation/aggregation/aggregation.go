@@ -61,27 +61,30 @@ func (aggregation *Aggregation) Run() {
 func (aggregation *Aggregation) handleMessage(msg middleware.Message, ack func(), nack func()) {
 	defer ack()
 
-	clientId, fruitRecords, isEof, err := inner.DeserializeMessage(&msg)
+	protocolMessage, err := inner.DeserializeMessage(&msg)
 	if err != nil {
 		slog.Error("While deserializing message", "err", err)
 		return
 	}
 
-	if isEof {
-		if err := aggregation.handleEndOfRecordsMessage(clientId); err != nil {
+	switch message := protocolMessage.(type) {
+	case inner.DataMessage:
+		aggregation.handleDataMessage(message.ClientId, message.FruitRecords)
+	case inner.FinMessage:
+		if err := aggregation.handleEndOfRecordsMessage(message.ClientId); err != nil {
 			slog.Error("While handling end of record message", "err", err)
 		}
-		return
+	default:
+		slog.Error("Unexpected message type on aggregation input", "clientId", message.GetClientId())
 	}
-
-	aggregation.handleDataMessage(clientId, fruitRecords)
 }
 
 func (aggregation *Aggregation) handleEndOfRecordsMessage(clientId int) error {
 	slog.Info("Received End Of Records message", "clientId", clientId)
 	clientFruitItemMap := aggregation.fruitItemMap[clientId]
 	fruitTopRecords := aggregation.buildFruitTop(clientFruitItemMap)
-	message, err := inner.SerializeMessage(clientId, fruitTopRecords)
+	topMessage := inner.TopMessage{ClientId: clientId, TopRecords: fruitTopRecords}
+	message, err := inner.SerializeTopMessage(topMessage)
 	if err != nil {
 		slog.Debug("While serializing top message", "err", err)
 		return err
@@ -91,16 +94,6 @@ func (aggregation *Aggregation) handleEndOfRecordsMessage(clientId int) error {
 		return err
 	}
 
-	eofMessage := []fruititem.FruitItem{}
-	message, err = inner.SerializeMessage(clientId, eofMessage)
-	if err != nil {
-		slog.Debug("While serializing EOF message", "err", err)
-		return err
-	}
-	if err := aggregation.outputQueue.Send(*message); err != nil {
-		slog.Debug("While sending EOF message", "err", err)
-		return err
-	}
 	delete(aggregation.fruitItemMap, clientId)
 	return nil
 }

@@ -34,27 +34,23 @@ func NewMessageHandler() MessageHandler {
 }
 
 func (messageHandler *MessageHandler) SerializeDataMessage(fruitRecord fruititem.FruitItem) (*middleware.Message, error) {
-	fruitData := []fruititem.FruitItem{fruitRecord}
-	clientId := messageHandler.clientId
-	return inner.SerializeMessage(clientId, fruitData)
+	dataMessage := inner.DataMessage{ClientId: messageHandler.clientId, FruitRecords: []fruititem.FruitItem{fruitRecord}}
+	return inner.SerializeDataMessage(dataMessage)
 }
 
 func (messageHandler *MessageHandler) SerializeEOFMessage() (*middleware.Message, error) {
-	data := []fruititem.FruitItem{}
-	clientId := messageHandler.clientId
-	return inner.SerializeMessage(clientId, data)
+	eofMessage := inner.EofMessage{ClientId: messageHandler.clientId}
+	return inner.SerializeEofMessage(eofMessage)
 }
 
 func (messageHandler *MessageHandler) DeserializeResultMessage(message *middleware.Message) ([]fruititem.FruitItem, error) {
-	clientId, fruitRecords, isEof, err := inner.DeserializeMessage(message)
+	protocolMessage, err := inner.DeserializeMessage(message)
 	if err != nil {
 		return nil, err
 	}
-	if clientId != messageHandler.clientId {
+	topMessage, ok := protocolMessage.(inner.TopMessage)
+	if !ok || topMessage.ClientId != messageHandler.clientId {
 		return nil, nil
 	}
-	if isEof { // TODO: Think how to handle [id, []] (empty top?)
-		return nil, nil
-	}
-	return fruitRecords, nil
+	return topMessage.TopRecords, nil
 }
