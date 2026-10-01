@@ -20,8 +20,6 @@ Como ahora cada nodo de suma consume de dos colas en go rotuines, creo un mutex 
 
 El segundo problema es que el aggregator recibe resultados parciales de un mismo cliente desde varios nodos suma, en cualquier orden, y no sabe cuándo ya tiene toda la información de ese cliente.
 Para saberlo, cuento mensajes. El gateway cuenta cuántos mensajes de datos envió cada cliente (total) y lo manda en el EOF, el flush lleva ese total a todos los nodos suma. Cada nodo suma cuenta cuántos mensajes de entrada procesó de ese cliente (processed) y lo envía al aggregator en su mensaje de fin, junto con total.
-El aggregator suma los processed que recibe de cada cliente. Cuando sum(processed) == total, recibió toda la información de ese cliente, ahí calcula el top N, lo envía al join y borra el estado de ese cliente.
-Esto no depende de cuántos nodos suma haya ni del orden en que lleguen los mensajes, y cubre el caso de un mensaje que todavía estaba en tránsito cuando llegó el flush (que podía darme resultados incompletos en el aggregator luego).
 
 El tercer problema es que RabbitMQ solo garantiza el orden dentro de una misma cola pero no entre colas distintas.
 Un mensaje de datos puede salir del input_queue antes que el EOF, pero el flush viaja por otra cola (la de cada nodo suma) y puede llegarle antes a un nodo suma que ese mensaje de datos. Ese nodo envía sus parciales y su fin sin incluirlo, y su diccionario parece completo aunque no lo está realmente.
