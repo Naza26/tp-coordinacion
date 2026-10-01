@@ -29,6 +29,7 @@ type Sum struct {
 	mutex                   sync.Mutex
 	fruitItemMap            map[int]map[string]fruititem.FruitItem
 	processedClientMessages map[int]int
+	flushedClients          map[int]int
 }
 
 func NewSum(config SumConfig) (*Sum, error) {
@@ -78,6 +79,7 @@ func NewSum(config SumConfig) (*Sum, error) {
 		flushOutputExchange:     flushOutputExchange,
 		fruitItemMap:            map[int]map[string]fruititem.FruitItem{},
 		processedClientMessages: map[int]int{},
+		flushedClients:          map[int]int{},
 	}, nil
 }
 
@@ -132,6 +134,11 @@ func (sum *Sum) handleDataMessage(clientId int, fruitRecords []fruititem.FruitIt
 	sum.mutex.Lock()
 	defer sum.mutex.Unlock()
 
+	if total, ok := sum.flushedClients[clientId]; ok {
+		slog.Info("Received data for flushed client, forwarding", "clientId", clientId)
+		return sum.forwardLateMessageDirectly(clientId, fruitRecords, total)
+	}
+
 	clientFruitItemMap, ok := sum.fruitItemMap[clientId]
 	if !ok {
 		clientFruitItemMap = map[string]fruititem.FruitItem{}
@@ -171,9 +178,12 @@ func (sum *Sum) handleFlushMessage(msg middleware.Message, ack func(), nack func
 		slog.Error("While flushing client", "err", err)
 	}
 
-	if err := sum.notifySumFinalization(flushMessage.ClientId, flushMessage.Total); err != nil {
+	processedMessageCount := sum.processedClientMessages[flushMessage.ClientId]
+	if err := sum.notifySumFinalization(flushMessage.ClientId, processedMessageCount, flushMessage.Total); err != nil {
 		slog.Error("While notifying sum finalization", "err", err)
 	}
+	delete(sum.processedClientMessages, flushMessage.ClientId)
+	sum.flushedClients[flushMessage.ClientId] = flushMessage.Total
 }
 
 func (sum *Sum) flushClient(clientId int) error {
@@ -196,8 +206,7 @@ func (sum *Sum) flushClient(clientId int) error {
 	return nil
 }
 
-func (sum *Sum) notifySumFinalization(clientId int, totalExpectedMessages int) error {
-	processedMessageCount := sum.processedClientMessages[clientId]
+func (sum *Sum) notifySumFinalization(clientId int, processedMessageCount int, totalExpectedMessages int) error {
 	slog.Info("Received FIN message", "clientId", clientId, "processed", processedMessageCount)
 	finMessage := inner.FinMessage{ClientId: clientId, Processed: processedMessageCount, Total: totalExpectedMessages}
 	message, err := inner.SerializeFinMessage(finMessage)
@@ -210,4 +219,19 @@ func (sum *Sum) notifySumFinalization(clientId int, totalExpectedMessages int) e
 		return err
 	}
 	return nil
+}
+
+func (sum *Sum) forwardLateMessageDirectly(clientId int, fruitRecords []fruititem.FruitItem, total int) error {
+	slog.Info("Received data for flushed client, forwarding", "clientId", clientId)
+	dataMessage := inner.DataMessage{ClientId: clientId, FruitRecords: fruitRecords}
+	message, err := inner.SerializeDataMessage(dataMessage)
+	if err != nil {
+		slog.Debug("While serializing message", "err", err)
+		return err
+	}
+	if err := sum.outputExchange.Send(*message); err != nil {
+		slog.Debug("While sending message", "err", err)
+		return err
+	}
+	return sum.notifySumFinalization(clientId, 1, total)
 }

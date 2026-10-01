@@ -26,3 +26,12 @@ Un mensaje de datos puede salir del input_queue antes que el EOF, pero el flush 
 Por eso no alcanza con esperar un fin de cada nodo suma, necesito saber cuántos mensajes tengo que esperar. Para saberlo, cuento mensajes. El gateway cuenta cuántos mensajes de datos envió cada cliente (total) y lo manda en el EOF, el flush lleva ese total a todos los nodos suma. Cada nodo suma cuenta cuántos mensajes de entrada procesó de ese cliente (processed) y lo envía al aggregator en su mensaje de fin, junto con total.
 El aggregator suma los processed que recibe de cada cliente. Cuando sum(processed) == total, recibió toda la información de ese cliente, ahí calcula el top N, lo envía al join y borra el estado de ese cliente.
 Esto no depende de cuántos nodos suma haya ni del orden en que lleguen los mensajes.
+
+
+El cuarto problema es que el mensaje que estaba en tránsito le llega a un nodo suma después de que ese nodo ya hizo el flush de ese cliente.
+Si el nodo lo guarda en su diccionario como cualquier otro mensaje, queda ahí para siempre, porque no va a llegar un segundo flush para ese cliente. Entonces el aggregator nunca llega a sum(processed) == total, el cliente nunca recibe su resultado y ese estado nunca se libera de la memoria del nodo suma.
+Además, con el diccionario solo no puedo distinguir si es el primer mensaje de un cliente que todavía no hizo flush (y lo tengo que guardar) o si es un mensaje de un cliente al que ya le hice flush (y lo tengo que enviar), porque en el flush borro la entrada de ese cliente.
+Para resolver esto, resolví que cada nodo suma guarda los clientes a los que ya les hizo flush junto con su total (flushedClients). Lo marco dentro del flush, con el mismo mutex, para que ningún mensaje de datos pueda procesarse entre que envío los parciales y marco al cliente.
+Cuando llega un mensaje de datos de un cliente que ya está en flushedClients, no lo guardo sinoq ue lo envío directamente al aggregator y después envío un mensaje de fin con processed = 1 y el total de ese cliente.
+El aggregator no cambia, suma ese 1 a los processed que ya tenía, llega a total y calcula el top. Como el mensaje de datos y el de fin salen del mismo nodo suma hacia la misma cola del aggregator, llegan en orden, así que el aggregator siempre recibe los datos antes que el fin.
+Decidí no borrar nunca flushedClients, porque es solo un número por cliente asi que el costo en memoria no es alto pero lo más porolijo sería manejar eso.
