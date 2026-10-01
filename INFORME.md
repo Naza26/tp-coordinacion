@@ -35,3 +35,15 @@ Para resolver esto, resolví que cada nodo suma guarda los clientes a los que ya
 Cuando llega un mensaje de datos de un cliente que ya está en flushedClients, no lo guardo sinoq ue lo envío directamente al aggregator y después envío un mensaje de fin con processed = 1 y el total de ese cliente.
 El aggregator no cambia, suma ese 1 a los processed que ya tenía, llega a total y calcula el top. Como el mensaje de datos y el de fin salen del mismo nodo suma hacia la misma cola del aggregator, llegan en orden, así que el aggregator siempre recibe los datos antes que el fin.
 Decidí no borrar nunca flushedClients, porque es solo un número por cliente asi que el costo en memoria no es alto pero lo más porolijo sería manejar eso.
+
+# Escenario 4: Múltiples clients + Múltiples Nodos de suma + Múltiples nodos de agregación
+
+Lamentablemente llegué muy justa a la entrega por lo cual, no tengo tiempo de terminar de implementar la solución. Si bien todos los tests me están pasando, no estoy escalando con respecto a múltiples nodos de agregación.
+Quiero plantear alto nivel acá el problema y cómo lo solucionaría en caso de que valga de algo para la entrega y para formalizar que soy consciente de que no está escalando.
+
+En este momento, todos los nodos de agregación esán recibiendo los datos. Cada uno está procesando el tope correctamente pero haciendo el mismo trabajo y luego delegándoselo al nodo de join.
+Entiendo que en la práctica esto no es relevante porque ni bien el gateway recibe un tope correcto lo escribe a output y se deben descartar los otros resultados.
+
+Debería definir un criterio de separación.
+Podría ser por dato o por cliente. En este momento no puedo hacer bien un tradeoff sobre las ventajas / desventajas de cada uno de los enfoques más que comentar que el particionamiento por dato a priori me parece más correcto pero a la vez más complejo, porque de nuevo, tengo ahora en este nodo un pedazo de los datos de cada cliente y tengo que pasarle la responsibilidad de joinear eso al otro nodo, al de join, porque siempre tiene que haber un funnel que agrupe la información que sigo particionando, sino nunca se encontraría para realizar el cáluclo final.
+
